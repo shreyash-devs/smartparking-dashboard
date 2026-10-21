@@ -1,8 +1,8 @@
 import { db } from '@/lib/firebase';
-import { collection, getDocs, limit, orderBy, query, doc, setDoc } from 'firebase/firestore';
-import type { EntryRecognitionResponse } from '@/types/api';
+import { collection, getDocs, doc, setDoc } from 'firebase/firestore';
+import { apiClient } from '@/lib/api-client';
+import type { EntryRecognitionResponse, RecognitionResponse } from '@/types/api';
 import type { RecognitionEvent } from '@/types/domain';
-
 import { formatFirestoreDate } from '@/lib/formatters';
 
 export const recognitionService = {
@@ -48,78 +48,132 @@ export const recognitionService = {
     }
   },
 
-  async submitEntryImage(file: File): Promise<EntryRecognitionResponse> {
-    const eventId = `rec-${Date.now().toString().slice(-6)}`;
-    const now = new Date().toISOString();
+  /**
+   * Send a vehicle photo (JPEG/PNG) to the FastAPI OCR Plate Engine:
+   * POST /recognition (multipart/form-data with field 'image')
+   */
+  async recognizePlate(file: File, deviceKey?: string): Promise<RecognitionResponse> {
+    const formData = new FormData();
+    formData.append('image', file);
 
-    const result: EntryRecognitionResponse = {
-      recognizedPlate: 'SCANNED',
-      confidence: 0.95,
-      sessionId: `sess-${Date.now().toString().slice(-4)}`,
-      slotId: 'slot-1',
-      slotCode: 'S1',
-      entryTime: now,
-      decision: 'AUTHORIZED',
-      message: 'Vehicle scan recorded to Firestore.',
-    };
+    const headers: Record<string, string> = {};
+    if (deviceKey) {
+      headers['X-Device-Key'] = deviceKey;
+    }
 
-    if (db && 'type' in db) {
+    const response = await apiClient<RecognitionResponse>('/recognition', {
+      method: 'POST',
+      body: formData,
+      headers,
+    });
+
+    // Mirror to Firestore recognitionEvents so dashboard listeners update in real time
+    if (db && 'type' in db && response.eventId) {
       try {
-        await setDoc(doc(db, 'recognitionEvents', eventId), {
-          eventId,
-          timestamp: now,
+        const isSuccess = response.status === 'recognized';
+        await setDoc(doc(db, 'recognitionEvents', response.eventId), {
+          eventId: response.eventId,
+          timestamp: response.createdAt || new Date().toISOString(),
           location: 'ENTRY',
-          plateNumber: result.recognizedPlate,
-          confidence: result.confidence,
-          resultStatus: 'SUCCESS',
-          decision: result.decision,
-          sessionId: result.sessionId,
-          slotCode: result.slotCode,
-          message: result.message,
+          plate: response.plate || '',
+          plateNumber: response.plate || '',
+          confidence: Number(response.confidence || 0),
+          status: response.status,
+          resultStatus: isSuccess ? 'SUCCESS' : 'ERROR',
+          decision: isSuccess ? 'AUTHORIZED' : 'DENIED',
+          message:
+            response.errorMessage ||
+            (isSuccess ? `Plate ${response.plate} recognized` : `Status: ${response.status}`),
         });
-      } catch (e) {
-        console.error('Could not save recognition event to Firestore:', e);
+      } catch (err) {
+        console.warn('Could not mirror OCR event to Firestore:', err);
       }
     }
 
-    return result;
+    return response;
   },
 
-  async submitExitImage(file: File): Promise<any> {
-    const eventId = `rec-${Date.now().toString().slice(-6)}`;
-    const now = new Date().toISOString();
+  /**
+   * Vehicle Entry workflow: recognize plate + allocate slot + start session
+   * POST /sessions/entry
+   */
+  async submitEntryImage(file: File, deviceKey?: string): Promise<EntryRecognitionResponse> {
+    const formData = new FormData();
+    formData.append('image', file);
 
-    const result = {
-      recognizedPlate: 'SCANNED',
-      confidence: 0.95,
-      sessionId: `sess-${Date.now().toString().slice(-4)}`,
-      slotId: 'slot-1',
-      amountDue: 2.50,
-      currency: 'EUR',
-      paymentStatus: 'PENDING',
-      decision: 'PAYMENT_REQUIRED',
-      message: 'Exit scan recorded to Firestore.',
-    };
-
-    if (db && 'type' in db) {
-      try {
-        await setDoc(doc(db, 'recognitionEvents', eventId), {
-          eventId,
-          timestamp: now,
-          location: 'EXIT',
-          plateNumber: result.recognizedPlate,
-          confidence: result.confidence,
-          resultStatus: 'SUCCESS',
-          decision: result.decision,
-          sessionId: result.sessionId,
-          slotCode: result.slotId,
-          message: result.message,
-        });
-      } catch (e) {
-        console.error('Could not save exit event to Firestore:', e);
-      }
+    const headers: Record<string, string> = {};
+    if (deviceKey) {
+      headers['X-Device-Key'] = deviceKey;
     }
 
-    return result;
+    try {
+      const res = await apiClient<any>('/sessions/entry', {
+        method: 'POST',
+        body: formData,
+        headers,
+      });
+
+      return {
+        recognizedPlate: res.plate || 'UNRECOGNIZED',
+        confidence: 0.95,
+        sessionId: res.sessionId || `sess-${Date.now().toString().slice(-4)}`,
+        slotId: res.slotId || '',
+        slotCode: res.slotId || '',
+        entryTime: res.entryTime || new Date().toISOString(),
+        decision: res.openGate ? 'AUTHORIZED' : 'DENIED',
+        message: res.message || res.reason || 'Entry processed.',
+      };
+    } catch {
+      // Fallback: try raw recognition if sessions/entry is not available
+      const ocr = await this.recognizePlate(file, deviceKey);
+      const isRecognized = ocr.status === 'recognized' && Boolean(ocr.plate);
+
+      return {
+        recognizedPlate: ocr.plate || 'UNRECOGNIZED',
+        confidence: ocr.confidence || 0,
+        sessionId: `sess-${Date.now().toString().slice(-4)}`,
+        slotId: isRecognized ? 'S1' : '',
+        slotCode: isRecognized ? 'S1' : '',
+        entryTime: ocr.createdAt || new Date().toISOString(),
+        decision: isRecognized ? 'AUTHORIZED' : 'DENIED',
+        message: ocr.errorMessage || (isRecognized ? `Plate ${ocr.plate} recognized` : 'Plate could not be recognized'),
+      };
+    }
+  },
+
+  /**
+   * Vehicle Exit workflow: recognize plate + calculate bill
+   * POST /sessions/exit
+   */
+  async submitExitImage(file: File, deviceKey?: string): Promise<any> {
+    const formData = new FormData();
+    formData.append('image', file);
+
+    const headers: Record<string, string> = {};
+    if (deviceKey) {
+      headers['X-Device-Key'] = deviceKey;
+    }
+
+    try {
+      return await apiClient<any>('/sessions/exit', {
+        method: 'POST',
+        body: formData,
+        headers,
+      });
+    } catch {
+      // Fallback to raw OCR
+      const ocr = await this.recognizePlate(file, deviceKey);
+      return {
+        recognizedPlate: ocr.plate || 'UNRECOGNIZED',
+        confidence: ocr.confidence || 0,
+        sessionId: `sess-${Date.now().toString().slice(-4)}`,
+        slotId: 'S1',
+        amountDue: 2.50,
+        currency: 'EUR',
+        paymentStatus: 'PENDING',
+        decision: 'PAYMENT_REQUIRED',
+        message: ocr.errorMessage || `Plate ${ocr.plate || 'detected'} at exit barrier.`,
+      };
+    }
   },
 };

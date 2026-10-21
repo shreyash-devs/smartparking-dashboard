@@ -1,7 +1,5 @@
 import type {
   ParkingSlot,
-  DashboardSummary,
-  Reservation,
   PaymentMethod,
   PaymentStatus,
   ReservationStatus,
@@ -11,6 +9,16 @@ import type {
 export interface SlotAvailabilityResponse {
   totalAvailable: number;
   slots: ParkingSlot[];
+}
+
+// FastAPI Plate Recognition response from POST /recognition
+export interface RecognitionResponse {
+  eventId: string;
+  status: 'recognized' | 'no_plate' | 'low_confidence' | 'error' | string;
+  plate: string | null;
+  confidence: number | null;
+  errorMessage?: string | null;
+  createdAt: string;
 }
 
 // Entry Recognition Response from POST /api/v1/payment/entry & POST /api/v1/recognition/entry

@@ -52,6 +52,19 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
     console.warn('Could not retrieve Firebase ID token:', err);
   }
 
+  // Attach X-Device-Key if present in env or local storage and not explicitly overridden
+  if (!reqHeaders.has('X-Device-Key')) {
+    const storedDeviceKey =
+      typeof window !== 'undefined'
+        ? window.localStorage.getItem('smartparking_device_key') || window.localStorage.getItem('device_key')
+        : null;
+    const envDeviceKey = import.meta.env.VITE_DEVICE_KEY;
+    const activeKey = storedDeviceKey || envDeviceKey;
+    if (activeKey) {
+      reqHeaders.set('X-Device-Key', activeKey);
+    }
+  }
+
   // Set default JSON Content-Type unless FormData body is supplied
   if (!(customConfig.body instanceof FormData) && !reqHeaders.has('Content-Type')) {
     reqHeaders.set('Content-Type', 'application/json');
@@ -66,7 +79,19 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
     if (!response.ok) {
       let errorData: any = {};
       try {
-        errorData = await response.json();
+        const rawText = await response.text();
+        try {
+          errorData = JSON.parse(rawText);
+        } catch {
+          if (rawText.includes('serviceAccountKey.json')) {
+            errorData = {
+              message:
+                "FastAPI server error: 'serviceAccountKey.json' is missing on Vercel backend. Upload your Firebase Admin credentials to the backend to store events.",
+            };
+          } else {
+            errorData = { message: rawText.slice(0, 300) || response.statusText || 'Request failed' };
+          }
+        }
       } catch {
         errorData = { message: response.statusText || 'Request failed' };
       }
