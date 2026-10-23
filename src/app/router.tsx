@@ -10,6 +10,7 @@ import { Loader2 } from 'lucide-react';
 // Admin pages
 import { DashboardPage } from '@/features/dashboard/DashboardPage';
 import { SlotsPage } from '@/features/slots/SlotsPage';
+import { DisplaySlotPage } from '@/features/display/DisplaySlotPage';
 import { ReservationsPage } from '@/features/reservations/ReservationsPage';
 import { RecognitionPage } from '@/features/recognition/RecognitionPage';
 import { SessionsPage } from '@/features/sessions/SessionsPage';
@@ -166,7 +167,9 @@ export const router = createBrowserRouter([
     ],
   },
 
-  // Preserved Legacy Admin Direct Routes (/dashboard, /slots, etc.)
+  // Public display route (no auth)
+    { path: '/displayslot', element: <DisplaySlotPage /> },
+    // Preserved Legacy Admin Direct Routes (/dashboard, /slots, etc.)
   {
     element: (
       <ProtectedRoute allowedRoles={['admin']}>

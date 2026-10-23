@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { dashboardService } from '@/services/dashboard.service';
 import { slotsService } from '@/services/slots.service';
 import { StatCard } from '@/components/cards/StatCard';
+import { reservationsService } from '@/services/reservations.service';
 import { SlotCard } from '@/components/cards/SlotCard';
 import type { ParkingSlot } from '@/types/domain';
 import {
@@ -29,6 +30,12 @@ export const DashboardPage: React.FC = () => {
     }
   }, [initialSlots]);
 
+  // Fetch reservations to compute reserved count
+  const { data: reservations = [], isLoading: isReservationsLoading } = useQuery({
+    queryKey: ['my-reservations'],
+    queryFn: () => reservationsService.listMyReservations(),
+  });
+
   useEffect(() => {
     const unsubscribe = slotsService.subscribeToLiveSlots(slots => {
       setLiveSlots(slots);
@@ -40,7 +47,7 @@ export const DashboardPage: React.FC = () => {
   const totalSlots = liveSlots.length;
   const occupiedSlots = liveSlots.filter(s => s.status === 'OCCUPIED').length;
   const availableSlots = liveSlots.filter(s => s.status === 'AVAILABLE').length;
-  const reservedSlots = liveSlots.filter(s => s.status === 'RESERVED').length;
+  const reservedSlots = reservations?.length ?? 0;
   const occupancyRate = totalSlots > 0 ? Math.round((occupiedSlots / totalSlots) * 100) : 0;
 
   // Selected slot modal / detail
