@@ -1,72 +1,156 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
   signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
   signOut as fbSignOut,
   onAuthStateChanged,
+  updateProfile as fbUpdateProfile,
   type User,
 } from 'firebase/auth';
-import { auth } from '@/lib/firebase';
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
+import type { UserRole } from '@/types/domain';
 
-interface AuthUser {
+export interface AuthUser {
   uid: string;
   email: string | null;
   displayName: string | null;
+  role: UserRole;
   isAdmin: boolean;
+  isUser: boolean;
+  defaultPlate?: string;
+  phone?: string;
 }
 
 interface AuthContextType {
   user: AuthUser | null;
   loading: boolean;
-  login: (email: string, pass: string) => Promise<void>;
-  loginAsDemo: (role?: 'user' | 'admin') => void;
+  login: (email: string, pass: string) => Promise<AuthUser>;
+  register: (
+    email: string,
+    pass: string,
+    displayName: string,
+    defaultPlate?: string
+  ) => Promise<AuthUser>;
   logout: () => Promise<void>;
+  updateUserProfile: (data: {
+    displayName?: string;
+    defaultPlate?: string;
+    phone?: string;
+  }) => Promise<void>;
   getIdToken: () => Promise<string | null>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-const DEMO_USER_KEY = 'smartpark_demo_session';
+/**
+ * Fetch or initialize user profile in Firestore users collection
+ */
+async function fetchOrInitUserProfile(
+  fbUser: User,
+  explicitRole?: UserRole,
+  initialPlate?: string
+): Promise<AuthUser> {
+  const defaultDisplayName =
+    fbUser.displayName || fbUser.email?.split('@')[0] || 'Parking Customer';
+
+  // Role resolution: if email contains 'admin' and no explicit role, grant admin
+  const isEmailAdmin = fbUser.email?.toLowerCase().includes('admin') || false;
+  const targetRole: UserRole = explicitRole || (isEmailAdmin ? 'admin' : 'user');
+
+  if (!db || !('type' in db)) {
+    return {
+      uid: fbUser.uid,
+      email: fbUser.email,
+      displayName: defaultDisplayName,
+      role: targetRole,
+      isAdmin: targetRole === 'admin',
+      isUser: targetRole === 'user',
+      defaultPlate: initialPlate || '',
+    };
+  }
+
+  try {
+    const userRef = doc(db, 'users', fbUser.uid);
+    const snap = await getDoc(userRef);
+
+    if (snap.exists()) {
+      const data = snap.data();
+      const role: UserRole = data.role === 'admin' ? 'admin' : 'user';
+      return {
+        uid: fbUser.uid,
+        email: fbUser.email,
+        displayName: data.displayName || defaultDisplayName,
+        role,
+        isAdmin: role === 'admin',
+        isUser: role === 'user',
+        defaultPlate: data.defaultPlate || initialPlate || '',
+        phone: data.phone || '',
+      };
+    } else {
+      // Create new profile document in Firestore
+      const newProfile = {
+        uid: fbUser.uid,
+        email: fbUser.email || '',
+        displayName: defaultDisplayName,
+        role: targetRole,
+        defaultPlate: initialPlate || '',
+        phone: '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      await setDoc(userRef, newProfile);
+
+      return {
+        uid: fbUser.uid,
+        email: fbUser.email,
+        displayName: defaultDisplayName,
+        role: targetRole,
+        isAdmin: targetRole === 'admin',
+        isUser: targetRole === 'user',
+        defaultPlate: initialPlate || '',
+        phone: '',
+      };
+    }
+  } catch (err) {
+    console.warn('Firestore user profile fetch error, using fallback:', err);
+    return {
+      uid: fbUser.uid,
+      email: fbUser.email,
+      displayName: defaultDisplayName,
+      role: targetRole,
+      isAdmin: targetRole === 'admin',
+      isUser: targetRole === 'user',
+      defaultPlate: initialPlate || '',
+    };
+  }
+}
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<AuthUser | null>(() => {
-    // Check if demo user session was saved
-    const saved = localStorage.getItem(DEMO_USER_KEY);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  });
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    // Check if real Firebase auth is functional
+    // Clean up any lingering legacy demo session
+    try {
+      localStorage.removeItem('smartpark_demo_session');
+    } catch {
+      // Ignore
+    }
+
     if (auth && typeof onAuthStateChanged === 'function') {
       try {
         const unsubscribe = onAuthStateChanged(auth, async fbUser => {
           if (fbUser) {
-            setUser({
-              uid: fbUser.uid,
-              email: fbUser.email,
-              displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'Operator',
-              isAdmin: fbUser.email?.includes('admin') || false,
-            });
-            localStorage.removeItem(DEMO_USER_KEY);
-          } else {
-            // Check if demo mode was active
-            const saved = localStorage.getItem(DEMO_USER_KEY);
-            if (saved) {
-              try {
-                setUser(JSON.parse(saved));
-              } catch {
-                setUser(null);
-              }
-            } else {
+            try {
+              const profile = await fetchOrInitUserProfile(fbUser);
+              setUser(profile);
+            } catch (err) {
+              console.error('Failed to resolve user profile:', err);
               setUser(null);
             }
+          } else {
+            setUser(null);
           }
           setLoading(false);
         });
@@ -81,33 +165,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  const login = async (email: string, pass: string) => {
+  const login = async (email: string, pass: string): Promise<AuthUser> => {
     setLoading(true);
     try {
       if (auth && typeof signInWithEmailAndPassword === 'function') {
         const res = await signInWithEmailAndPassword(auth, email, pass);
-        const fbUser = res.user;
-        setUser({
-          uid: fbUser.uid,
-          email: fbUser.email,
-          displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'Operator',
-          isAdmin: email.includes('admin'),
-        });
-        localStorage.removeItem(DEMO_USER_KEY);
+        const profile = await fetchOrInitUserProfile(res.user);
+        setUser(profile);
+        return profile;
       } else {
         throw new Error('Firebase Auth unavailable');
       }
     } catch (err: any) {
-      setLoading(false);
-      // Map Firebase error codes to friendly strings
       if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
-        throw new Error('Invalid email or password. Please check your credentials.');
+        throw new Error('Invalid email or password. Please verify your credentials.');
       } else if (err.code === 'auth/user-not-found') {
-        throw new Error('No account found with this email address.');
+        throw new Error('No registered account found with this email.');
       } else if (err.code === 'auth/too-many-requests') {
-        throw new Error('Access temporarily disabled due to too many failed attempts. Try again later.');
+        throw new Error('Access temporarily disabled due to failed attempts. Try again later.');
       } else if (err.code === 'auth/network-request-failed') {
-        throw new Error('Network error. Check your connection or test using Demo Mode.');
+        throw new Error('Network error. Check your internet connection.');
       }
       throw err;
     } finally {
@@ -115,15 +192,72 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const loginAsDemo = (role: 'user' | 'admin' = 'admin') => {
-    const demoProfile: AuthUser = {
-      uid: role === 'admin' ? 'demo-admin-id' : 'demo-user-1',
-      email: role === 'admin' ? 'admin@smartparking.iot' : 'driver@smartparking.iot',
-      displayName: role === 'admin' ? 'Admin Station' : 'Driver Alex',
-      isAdmin: role === 'admin',
+  const register = async (
+    email: string,
+    pass: string,
+    displayName: string,
+    defaultPlate?: string
+  ): Promise<AuthUser> => {
+    setLoading(true);
+    try {
+      if (auth && typeof createUserWithEmailAndPassword === 'function') {
+        const res = await createUserWithEmailAndPassword(auth, email, pass);
+        if (displayName) {
+          try {
+            await fbUpdateProfile(res.user, { displayName });
+          } catch (e) {
+            console.warn('Could not update displayName:', e);
+          }
+        }
+        // Public registration always assigns 'user' role
+        const profile = await fetchOrInitUserProfile(res.user, 'user', defaultPlate);
+        setUser(profile);
+        return profile;
+      } else {
+        throw new Error('Firebase Auth registration unavailable');
+      }
+    } catch (err: any) {
+      if (err.code === 'auth/email-already-in-use') {
+        throw new Error('This email is already registered. Please sign in instead.');
+      } else if (err.code === 'auth/weak-password') {
+        throw new Error('Password should be at least 6 characters.');
+      } else if (err.code === 'auth/invalid-email') {
+        throw new Error('Please enter a valid email address.');
+      }
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateUserProfile = async (data: {
+    displayName?: string;
+    defaultPlate?: string;
+    phone?: string;
+  }) => {
+    if (!user) return;
+
+    const updatedUser: AuthUser = {
+      ...user,
+      displayName: data.displayName !== undefined ? data.displayName : user.displayName,
+      defaultPlate: data.defaultPlate !== undefined ? data.defaultPlate : user.defaultPlate,
+      phone: data.phone !== undefined ? data.phone : user.phone,
     };
-    setUser(demoProfile);
-    localStorage.setItem(DEMO_USER_KEY, JSON.stringify(demoProfile));
+    setUser(updatedUser);
+
+    if (db && 'type' in db && !user.uid.startsWith('demo-')) {
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        await updateDoc(userRef, {
+          ...(data.displayName ? { displayName: data.displayName } : {}),
+          ...(data.defaultPlate !== undefined ? { defaultPlate: data.defaultPlate } : {}),
+          ...(data.phone !== undefined ? { phone: data.phone } : {}),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        console.warn('Failed to update Firestore profile document:', err);
+      }
+    }
   };
 
   const logout = async () => {
@@ -134,7 +268,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err) {
       console.warn('Firebase logout notice:', err);
     }
-    localStorage.removeItem(DEMO_USER_KEY);
     setUser(null);
   };
 
@@ -142,7 +275,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (auth && auth.currentUser) {
       return await auth.currentUser.getIdToken();
     }
-    return user ? 'mock-demo-id-token' : null;
+    return null;
   };
 
   return (
@@ -151,8 +284,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user,
         loading,
         login,
-        loginAsDemo,
+        register,
         logout,
+        updateUserProfile,
         getIdToken,
       }}
     >

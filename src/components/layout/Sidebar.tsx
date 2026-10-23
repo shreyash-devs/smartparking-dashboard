@@ -1,5 +1,6 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, Link } from 'react-router-dom';
+
 import {
   LayoutDashboard,
   CircleParking,
@@ -96,6 +97,21 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobile }) => {
           );
         })}
       </nav>
+
+      {/* Switch to Customer Portal */}
+      <div className="px-3 pb-2">
+        <Link
+          to="/parking"
+          onClick={onCloseMobile}
+          className="flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold text-cyan-300 bg-cyan-950/30 border border-cyan-500/30 hover:bg-cyan-900/40 transition-all"
+        >
+          <div className="flex items-center gap-2">
+            <CircleParking className="w-4 h-4 text-cyan-400" />
+            <span>Driver Portal View</span>
+          </div>
+          <ChevronRight className="w-3.5 h-3.5 opacity-60" />
+        </Link>
+      </div>
 
       {/* User profile & Logout */}
       <div className="p-3 border-t border-slate-800/80 bg-slate-950/30">

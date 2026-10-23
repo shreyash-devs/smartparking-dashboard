@@ -2,13 +2,12 @@ import React, { useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { paymentsService } from '@/services/payments.service';
 import { useToast } from '@/components/feedback/ToastContext';
-import type { ExitBillResponse, MockPaymentResponse } from '@/types/api';
+import type { ExitBillResponse, MockPaymentResponse, MockPayResponse, PendingBill } from '@/types/api';
 import type { PaymentRecord } from '@/types/domain';
 import {
   CreditCard,
   Upload,
   CheckCircle2,
-  Euro,
   Clock,
   Car,
   ShieldCheck,
@@ -16,6 +15,8 @@ import {
   Sparkles,
   ArrowRight,
   Zap,
+  Ticket,
+  RefreshCw,
 } from 'lucide-react';
 import {
   formatCurrency,
@@ -32,10 +33,21 @@ export const PaymentsPage: React.FC = () => {
     queryFn: () => paymentsService.getPaymentHistory(),
   });
 
+  // Query Endpoint C: GET /payments/pending (Active 6-digit codes)
+  const {
+    data: pendingBills = [],
+    refetch: refetchPending,
+    isLoading: isLoadingPending,
+  } = useQuery<PendingBill[]>({
+    queryKey: ['pending-bills'],
+    queryFn: () => paymentsService.listPendingBills(),
+    refetchInterval: 5000,
+  });
+
   // Exit Camera Bill scan state
   const [exitFile, setExitFile] = useState<File | null>(null);
   const [activeBill, setActiveBill] = useState<ExitBillResponse | null>(null);
-  const [lastPaymentResult, setLastPaymentResult] = useState<MockPaymentResponse | null>(null);
+  const [lastPaymentResult, setLastPaymentResult] = useState<MockPayResponse | null>(null);
 
   // Calculate bill mutation
   const billMutation = useMutation({
@@ -50,16 +62,28 @@ export const PaymentsPage: React.FC = () => {
     },
   });
 
-  // Process Mock Payment mutation
+  // Process Mock Payment mutation -> POST /payments/{paymentId}/mock-pay
   const paymentMutation = useMutation({
-    mutationFn: (sessionId: string) =>
-      paymentsService.processMockPayment({
-        sessionId,
-        paymentMethod: 'MOCK',
-      }),
+    mutationFn: (billData: {
+      paymentId?: string;
+      sessionId?: string;
+      amountDue?: number;
+      plateNumber?: string;
+      slotId?: string;
+    }) =>
+      paymentsService.processMockPayment(
+        billData.paymentId || `pay_${billData.sessionId?.slice(-8) || Date.now().toString().slice(-8)}`,
+        billData.amountDue || 20,
+        billData.sessionId || '',
+        billData.plateNumber || '',
+        'MOCK',
+        'admin',
+        billData.slotId || ''
+      ),
     onSuccess: res => {
       setLastPaymentResult(res);
       refetch();
+      refetchPending();
       if (activeBill) {
         setActiveBill({ ...activeBill, isPaid: true, paymentStatus: 'SUCCEEDED' });
       }
@@ -190,6 +214,24 @@ export const PaymentsPage: React.FC = () => {
                   </div>
                 </div>
 
+                {/* 6-Digit Code Badge if generated */}
+                {activeBill.paymentCode && (
+                  <div className="p-3.5 rounded-xl bg-indigo-50 border border-indigo-200/90 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2.5">
+                      <Ticket className="w-4 h-4 text-indigo-600" />
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">6-Digit Exit Payment Code (Gate Display):</span>
+                        <span className="font-mono font-extrabold text-base text-indigo-700 tracking-wider">
+                          #{activeBill.paymentCode}
+                        </span>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-medium text-indigo-600 bg-white px-2 py-1 rounded border border-indigo-200">
+                      Valid 15 Mins
+                    </span>
+                  </div>
+                )}
+
                 <div className="p-4 rounded-2xl bg-indigo-50/70 border border-indigo-100 flex items-center justify-between">
                   <div>
                     <span className="text-xs text-indigo-700 font-medium">Authoritative Total Due</span>
@@ -200,12 +242,20 @@ export const PaymentsPage: React.FC = () => {
 
                   {!activeBill.isPaid && (
                     <button
-                      onClick={() => paymentMutation.mutate(activeBill.sessionId)}
+                      onClick={() =>
+                        paymentMutation.mutate({
+                          paymentId: activeBill.paymentId,
+                          sessionId: activeBill.sessionId,
+                          amountDue: activeBill.amountDue,
+                          plateNumber: activeBill.plateNumber,
+                          slotId: activeBill.slotId,
+                        })
+                      }
                       disabled={paymentMutation.isPending}
                       className="px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs shadow-md shadow-indigo-600/20 active:scale-95 disabled:opacity-50 flex items-center gap-2"
                     >
                       <Sparkles className="w-4 h-4" />
-                      <span>{paymentMutation.isPending ? 'Processing...' : 'Submit Mock Payment'}</span>
+                      <span>{paymentMutation.isPending ? 'Processing...' : 'Submit Mock Payment & Open Gate'}</span>
                     </button>
                   )}
                 </div>
@@ -221,7 +271,7 @@ export const PaymentsPage: React.FC = () => {
                       {lastPaymentResult.message}
                     </p>
                     <div className="pt-1 flex items-center gap-3 font-mono text-[11px] text-emerald-800">
-                      <span>Gate Command: {lastPaymentResult.gateCommandIssued ? 'DISPATCHED' : 'PENDING'}</span>
+                      <span>Gate Command: {lastPaymentResult.gateCommandIssued ? 'DISPATCHED (OPEN)' : 'PENDING'}</span>
                       <span>Paid At: {formatDateTime(lastPaymentResult.paidAt)}</span>
                     </div>
                   </div>
@@ -237,6 +287,106 @@ export const PaymentsPage: React.FC = () => {
               </div>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Endpoint C: View All Pending Codes (Admin / Lot Screen) */}
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs overflow-hidden">
+        <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center">
+              <Ticket className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-slate-900 font-heading">
+                Active Pending 6-Digit Payment Codes (Exit Queue)
+              </h3>
+              <p className="text-[11px] text-slate-500">
+                Live queue from GET /payments/pending • Waiting for customer self-checkout or cashier settlement
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => refetchPending()}
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+            title="Refresh Pending Codes"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPending ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs text-slate-600">
+            <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider font-semibold border-b border-slate-200">
+              <tr>
+                <th className="py-3 px-4">Payment Code</th>
+                <th className="py-3 px-4">Vehicle Plate</th>
+                <th className="py-3 px-4">Slot</th>
+                <th className="py-3 px-4">Duration</th>
+                <th className="py-3 px-4">Amount Due</th>
+                <th className="py-3 px-4">Status</th>
+                <th className="py-3 px-4 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {pendingBills.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="p-8 text-center text-slate-400">
+                    <p className="font-semibold text-slate-600 text-xs">No pending payment codes</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      When a vehicle triggers the exit camera, its 6-digit payment code will appear here.
+                    </p>
+                  </td>
+                </tr>
+              ) : (
+                pendingBills.map(bill => (
+                  <tr key={bill.paymentId || bill.paymentCode} className="hover:bg-slate-50/80 transition-colors">
+                    <td className="py-3 px-4">
+                      <span className="font-mono font-bold text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded">
+                        #{bill.paymentCode}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 font-mono font-bold text-slate-800 uppercase">
+                      {bill.vehicleNumber}
+                    </td>
+                    <td className="py-3 px-4 font-semibold text-slate-700">
+                      Bay {bill.slotId}
+                    </td>
+                    <td className="py-3 px-4 text-slate-600">
+                      {bill.durationMinutes || Math.round((bill.durationSeconds || 1800) / 60)} mins
+                    </td>
+                    <td className="py-3 px-4 font-mono font-bold text-emerald-600">
+                      {formatCurrency(bill.amount, bill.currency)}
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                        <Clock className="w-3 h-3 text-amber-500" />
+                        Pending
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-right">
+                      <button
+                        onClick={() =>
+                          paymentMutation.mutate({
+                            paymentId: bill.paymentId,
+                            sessionId: `sess_${bill.paymentCode}`,
+                            amountDue: bill.amount,
+                            plateNumber: bill.vehicleNumber,
+                            slotId: bill.slotId,
+                          })
+                        }
+                        disabled={paymentMutation.isPending}
+                        className="py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-[11px] transition-all shadow-xs inline-flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        <CreditCard className="w-3 h-3" />
+                        <span>Settle & Open Gate</span>
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 

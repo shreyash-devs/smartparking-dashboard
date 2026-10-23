@@ -135,3 +135,17 @@ export interface IoTDevice {
   lastCommandAck?: 'RECEIVED' | 'PENDING' | 'FAILED';
   physicalState?: string;
 }
+
+export type UserRole = 'admin' | 'user';
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  phone?: string;
+  defaultPlate?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, Link } from 'react-router-dom';
 import {
   Menu,
   RefreshCw,
@@ -7,7 +7,9 @@ import {
   Zap,
   CheckCircle2,
   AlertCircle,
+  Car,
 } from 'lucide-react';
+
 import { useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/components/feedback/ToastContext';
 
@@ -99,6 +101,16 @@ export const Header: React.FC<HeaderProps> = ({ onOpenMobileNav }) => {
       {/* Right controls */}
       <div className="flex items-center gap-2.5">
 
+        {/* Customer Portal Link */}
+        <Link
+          to="/parking"
+          className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 text-xs font-semibold transition-all"
+          title="Switch to Customer Parking Portal"
+        >
+          <Car className="w-3.5 h-3.5 text-indigo-600" />
+          <span>Customer Portal</span>
+        </Link>
+
         {/* Live Firestore indicator */}
         <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-50 border border-slate-200 text-slate-700 text-xs font-medium">
           <span className="w-2 h-2 rounded-full bg-emerald-500" />
@@ -118,3 +130,4 @@ export const Header: React.FC<HeaderProps> = ({ onOpenMobileNav }) => {
     </header>
   );
 };
+
