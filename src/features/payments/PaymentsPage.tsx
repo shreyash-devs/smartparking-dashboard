@@ -402,7 +402,7 @@ export const PaymentsPage: React.FC = () => {
           <table className="w-full text-left text-xs text-slate-600">
             <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider font-semibold border-b border-slate-200">
               <tr>
-                <th className="py-3 px-4">Payment ID</th>
+                <th className="py-3 px-4">Payment Code / ID</th>
                 <th className="py-3 px-4">Session</th>
                 <th className="py-3 px-4">Plate</th>
                 <th className="py-3 px-4">Amount</th>
@@ -423,7 +423,20 @@ export const PaymentsPage: React.FC = () => {
               ) : (
                 paymentHistory.map(pay => (
                   <tr key={pay.paymentId} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-3.5 px-4 font-mono font-bold text-slate-900">{pay.paymentId}</td>
+                    <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
+                      {pay.paymentCode ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded text-xs">
+                            #{pay.paymentCode}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-normal">
+                            ({pay.paymentId.slice(0, 8)}...)
+                          </span>
+                        </div>
+                      ) : (
+                        pay.paymentId
+                      )}
+                    </td>
                     <td className="py-3.5 px-4 font-mono text-blue-600">{pay.sessionId}</td>
                     <td className="py-3.5 px-4 font-mono font-bold text-slate-800">
                       {pay.plateNumber || '—'}

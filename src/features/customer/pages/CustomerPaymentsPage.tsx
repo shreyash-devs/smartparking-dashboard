@@ -52,6 +52,9 @@ export const CustomerPaymentsPage: React.FC = () => {
     setLookupResult(null);
 
     try {
+      // Calls GET /payments/code/{code} on FastAPI backend.
+      // The returned paymentId is used directly when paying via
+      // POST /payments/{paymentId}/mock-pay.
       const bill = await paymentsService.lookupByCode(code);
       if (bill) {
         setLookupResult(bill);
@@ -212,7 +215,7 @@ export const CustomerPaymentsPage: React.FC = () => {
                   <div>
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-white font-mono">
-                        {item.paymentId}
+                        {item.paymentCode ? item.paymentCode : item.paymentId}
                       </span>
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-300">
                         {item.status}

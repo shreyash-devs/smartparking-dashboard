@@ -47,7 +47,8 @@ export const PaymentCheckoutModal: React.FC<PaymentCheckoutModalProps> = ({
         bill.vehicleNumber,
         selectedMethod,
         user?.uid || 'current-user',
-        bill.slotId
+        bill.slotId,
+        bill.paymentCode   // ← pass the 6-digit code so it's saved to Firestore
       );
 
       setSuccessResult(res);

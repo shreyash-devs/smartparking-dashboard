@@ -59,6 +59,7 @@ export const paymentsService = {
 
         results.push({
           paymentId: d.id,
+          paymentCode: data.paymentCode || data.code || '',
           sessionId: data.sessionId || '',
           plateNumber: data.plateNumber || data.vehicleNumber || '',
           amount: Number(data.amount || 0),
@@ -103,6 +104,7 @@ export const paymentsService = {
             }
             results.push({
               paymentId: d.id,
+              paymentCode: data.paymentCode || data.code || '',
               sessionId: data.sessionId || '',
               plateNumber: data.plateNumber || data.vehicleNumber || '',
               amount: Number(data.amount || 0),
@@ -148,10 +150,43 @@ export const paymentsService = {
         }));
       }
     } catch (e) {
-      // Backend might be offline; fall back to Firestore active sessions
+      // Backend might be offline; fall back to Firestore payments / active sessions
     }
 
-    // 2. Query Firestore parkingSessions for active / pending bills
+    // 2. Query Firestore payments collection for pending/active records
+    if (db && 'type' in db) {
+      try {
+        const paySnap = await getDocs(collection(db, 'payments'));
+        const list: PendingBill[] = [];
+
+        paySnap.forEach(d => {
+          const data = d.data();
+          const rawStatus = String(data.status || '').toLowerCase();
+          // Include if pending or has paymentCode
+          if (data.paymentCode && (rawStatus === 'pending' || rawStatus === 'payment_pending' || rawStatus === 'active')) {
+            list.push({
+              paymentId: d.id,
+              paymentCode: String(data.paymentCode).trim(),
+              vehicleNumber: data.plateNumber || data.vehicleNumber || 'VEHICLE',
+              slotId: String(data.slotId || data.slotCode || 'S1').replace('slot-', '').toUpperCase(),
+              amount: Number(data.amount || 20),
+              currency: data.currency || 'INR',
+              durationMinutes: 45,
+              durationSeconds: 2700,
+              status: 'pending',
+            });
+          }
+        });
+
+        if (list.length > 0) {
+          return list;
+        }
+      } catch (err) {
+        console.warn('Firestore pending payments query warning:', err);
+      }
+    }
+
+    // 3. Fallback: Query Firestore parkingSessions for sessions with an explicit paymentCode
     if (db && 'type' in db) {
       try {
         const snap = await getDocs(collection(db, 'parkingSessions'));
@@ -160,7 +195,7 @@ export const paymentsService = {
         snap.forEach(d => {
           const data = d.data();
           const rawStatus = String(data.status || '').toLowerCase();
-          if (rawStatus === 'active' || rawStatus === 'payment_pending') {
+          if (data.paymentCode && (rawStatus === 'active' || rawStatus === 'payment_pending')) {
             const entryTime = data.entryTime || data.entryAt || data.createdAt || new Date().toISOString();
             const durationMins = Math.max(
               15,
@@ -171,7 +206,7 @@ export const paymentsService = {
 
             list.push({
               paymentId: `pay_${d.id.slice(-8)}`,
-              paymentCode: data.paymentCode || d.id.slice(-6).toUpperCase(),
+              paymentCode: String(data.paymentCode).trim(),
               vehicleNumber: data.vehicleNumber || data.plateNumber || 'VEHICLE',
               slotId: String(data.slotId || data.slotCode || 'S1').replace('slot-', '').toUpperCase(),
               amount,
@@ -194,17 +229,22 @@ export const paymentsService = {
   /**
    * Endpoint A: Look Up Bill by 6-Digit Code
    * GET /payments/code/{code}
+   *
+   * Returns the pending bill details including the real paymentId from FastAPI,
+   * which is then used directly by processMockPayment → POST /payments/{paymentId}/mock-pay
    */
   async lookupByCode(code: string): Promise<PendingBillLookupResult | null> {
     const cleanCode = code.trim();
     if (!cleanCode) return null;
 
     // 1. Try FastAPI backend GET /payments/code/{code}
+    //    The paymentId returned here is the canonical ID used by mock-pay endpoint
     try {
       const res = await apiClient<any>(`/payments/code/${cleanCode}`, { method: 'GET' });
-      if (res && (res.paymentId || res.amount !== undefined)) {
+      if (res && res.paymentId) {
+        // Use the real FastAPI paymentId — this is what POST /payments/{paymentId}/mock-pay expects
         return {
-          paymentId: res.paymentId || `pay_${cleanCode}`,
+          paymentId: res.paymentId,
           paymentCode: res.paymentCode || cleanCode,
           vehicleNumber: res.vehicleNumber || res.plateNumber || 'VEHICLE',
           slotId: res.slotId || 'S1',
@@ -222,58 +262,39 @@ export const paymentsService = {
       // Backend lookup might fail or return 404, check active sessions in Firestore
     }
 
-    // 2. Query Firestore parkingSessions for matching code or active session
+    // 2. Query Firestore payments collection for matching paymentCode
     if (db && 'type' in db) {
       try {
-        const snap = await getDocs(collection(db, 'parkingSessions'));
-        let found: any = null;
+        const paySnap = await getDocs(collection(db, 'payments'));
+        let foundPay: any = null;
 
-        snap.forEach(d => {
+        paySnap.forEach(d => {
           const data = d.data();
           if (
-            data.paymentCode === cleanCode ||
-            d.id.includes(cleanCode) ||
-            String(data.vehicleNumber || '').toUpperCase().includes(cleanCode.toUpperCase())
+            (data.paymentCode && String(data.paymentCode).trim() === cleanCode) ||
+            (data.code && String(data.code).trim() === cleanCode) ||
+            d.id === cleanCode
           ) {
-            found = { id: d.id, ...data };
+            foundPay = { id: d.id, ...data };
           }
         });
 
-        // If not found by specific code, check if there's any active session
-        if (!found) {
-          snap.forEach(d => {
-            const data = d.data();
-            if (String(data.status).toLowerCase() === 'active' && !found) {
-              found = { id: d.id, ...data };
-            }
-          });
-        }
-
-        if (found) {
-          const entryTime = found.entryTime || found.entryAt || found.createdAt || new Date().toISOString();
-          const durationMins = Math.max(
-            15,
-            Math.round((Date.now() - new Date(entryTime).getTime()) / 60000)
-          );
-          const hourlyRate = 20; // ₹20/hr, min 1 hr
-          const amount = Math.max(20, Math.ceil(durationMins / 60) * hourlyRate);
-
+        if (foundPay) {
           return {
-            paymentId: `pay_${found.id.slice(-8)}`,
-            paymentCode: cleanCode,
-            vehicleNumber: found.vehicleNumber || found.plateNumber || 'MH12AB1234',
-            slotId: found.slotId || 'S1',
-            slotCode: String(found.slotId || 'S1').replace('slot-', '').toUpperCase(),
-            amount,
-            currency: 'INR',
-            durationMinutes: durationMins,
-            entryTime: formatFirestoreDate(entryTime),
-            sessionId: found.id,
-            status: 'pending',
+            paymentId: foundPay.id,
+            paymentCode: foundPay.paymentCode || cleanCode,
+            vehicleNumber: foundPay.plateNumber || foundPay.vehicleNumber || 'VEHICLE',
+            slotId: foundPay.slotId || 'S1',
+            slotCode: String(foundPay.slotId || 'S1').replace('slot-', '').toUpperCase(),
+            amount: Number(foundPay.amount || 20),
+            currency: foundPay.currency || 'INR',
+            durationMinutes: 45,
+            sessionId: foundPay.sessionId || `sess_${foundPay.id}`,
+            status: foundPay.status || 'pending',
           };
         }
       } catch (err) {
-        console.warn('Firestore session lookup error:', err);
+        console.warn('Firestore payment lookup error:', err);
       }
     }
 
@@ -300,6 +321,9 @@ export const paymentsService = {
    * Endpoint B: Complete Payment (Mock Pay)
    * POST /payments/{paymentId}/mock-pay
    * Request Body: { "amount": amount }
+   *
+   * The paymentId MUST be the one returned by GET /payments/code/{code}
+   * so FastAPI can match the payment record and send the MQTT gate open command.
    */
   async processMockPayment(
     paymentIdOrReq:
@@ -319,7 +343,8 @@ export const paymentsService = {
     vehiclePlateArg: string = '',
     methodArg: string = 'MOCK',
     userIdArg: string = 'current-user',
-    slotIdArg: string = ''
+    slotIdArg: string = '',
+    paymentCodeArg: string = ''
   ): Promise<MockPayResponse> {
     let paymentId: string;
     let amount: number;
@@ -328,6 +353,7 @@ export const paymentsService = {
     let method: string;
     let userId: string;
     let slotId: string;
+    let paymentCode: string;
 
     if (typeof paymentIdOrReq === 'object') {
       paymentId = (paymentIdOrReq as any).paymentId || (paymentIdOrReq as any).sessionId || `pay_${Date.now().toString().slice(-8)}`;
@@ -337,6 +363,7 @@ export const paymentsService = {
       method = (paymentIdOrReq as any).paymentMethod || 'MOCK';
       userId = (paymentIdOrReq as any).userId || 'current-user';
       slotId = (paymentIdOrReq as any).slotId || '';
+      paymentCode = (paymentIdOrReq as any).paymentCode || '';
     } else {
       paymentId = paymentIdOrReq;
       amount = Number(amountArg !== undefined ? amountArg : 20);
@@ -345,6 +372,7 @@ export const paymentsService = {
       method = methodArg;
       userId = userIdArg;
       slotId = slotIdArg;
+      paymentCode = paymentCodeArg;
     }
 
     const now = new Date().toISOString();
@@ -372,6 +400,7 @@ export const paymentsService = {
     // 2. Persist to Firestore payments collection
     const paymentRecord = {
       paymentId: finalPaymentId,
+      paymentCode: paymentCode || '',          // ← save the 6-digit code so DisplaySlotPage can read it
       sessionId: sessionId || `sess_${finalPaymentId}`,
       plateNumber: vehiclePlate,
       userId,

@@ -1,8 +1,15 @@
 import React, { useEffect, useState } from 'react';
+import { db } from '@/lib/firebase';
+import {
+  collection,
+  onSnapshot,
+  query,
+  orderBy,
+  limit,
+} from 'firebase/firestore';
 import { slotsService } from '@/services/slots.service';
-import { paymentsService } from '@/services/payments.service';
 import { formatRelativeTime } from '@/lib/formatters';
-import { Loader2, Clock } from 'lucide-react';
+import { Loader2, Clock, QrCode } from 'lucide-react';
 
 // Helper to map slot status to colour classes
 const statusColor = (status: string) => {
@@ -22,9 +29,8 @@ const statusColor = (status: string) => {
 
 export const DisplaySlotPage: React.FC = () => {
   const [slots, setSlots] = useState<any[]>([]);
-  const [payments, setPayments] = useState<any[]>([]);
+  const [paymentCode, setPaymentCode] = useState<string | null>(null);
   const [loadingSlots, setLoadingSlots] = useState(true);
-  const [loadingPayments, setLoadingPayments] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [clock, setClock] = useState(new Date());
 
@@ -47,25 +53,38 @@ export const DisplaySlotPage: React.FC = () => {
     return () => unsub && unsub();
   }, []);
 
-  // Load pending public‑safe payments once
+  // Subscribe strictly to Firestore `payments` collection — show the paymentCode from payments document ONLY
   useEffect(() => {
-    const load = async () => {
-      try {
-        const pending = await paymentsService.listPendingBills();
-        setPayments(pending);
-      } catch (e) {
-        console.warn('Failed to fetch pending payments', e);
-      } finally {
-        setLoadingPayments(false);
+    if (!db || !('type' in db)) return;
+
+    // Listen only to `payments` collection
+    const paymentsQ = query(
+      collection(db, 'payments'),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+
+    const unsubPayments = onSnapshot(paymentsQ, (snapshot) => {
+      let foundCode: string | null = null;
+      for (const d of snapshot.docs) {
+        const data = d.data();
+        const code = data.paymentCode || data.code;
+        if (code && String(code).trim()) {
+          foundCode = String(code).trim();
+          break;
+        }
       }
-    };
-    load();
+      setPaymentCode(foundCode);
+    }, (err) => {
+      console.warn('Payment code listener error', err);
+    });
+
+    return () => unsubPayments();
   }, []);
 
   const total = slots.length;
   const available = slots.filter((s) => s.status === 'AVAILABLE').length;
   const occupied = slots.filter((s) => s.status === 'OCCUPIED').length;
-  const unknown = total - available - occupied;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col p-6">
@@ -98,7 +117,7 @@ export const DisplaySlotPage: React.FC = () => {
       <main className="flex-1 grid grid-cols-2 gap-6 mb-6">
         {loadingSlots ? (
           <div className="col-span-2 flex items-center justify-center">
-            <Loader2 className="animate-spin w-12 h-12 text-indigo-400" /> Loading slots…
+            <Loader2 className="animate-spin w-12 h-12 text-indigo-400 mr-3" /> Loading slots…
           </div>
         ) : (
           slots.slice(0, 4).map((slot) => (
@@ -122,31 +141,26 @@ export const DisplaySlotPage: React.FC = () => {
         </div>
       </footer>
 
-      {/* Payment notification panel */}
-      <section className="mt-4 bg-slate-800 p-4 rounded-xl max-h-48 overflow-y-auto">
-        <h2 className="text-xl font-heading mb-2">Pending Payments</h2>
-        {loadingPayments ? (
-          <div className="flex items-center gap-2">
-            <Loader2 className="animate-spin w-5 h-5" /> Loading…
-          </div>
-        ) : payments.length === 0 ? (
-          <p className="opacity-70">No pending payments.</p>
+      {/* ── Payment Code Display (Customer Portal) ── */}
+      <section className="mt-4 bg-slate-900 border border-indigo-500/40 rounded-2xl p-8 flex flex-col items-center justify-center text-center gap-4">
+        <div className="flex items-center gap-2 text-indigo-400 text-sm font-semibold uppercase tracking-widest">
+          <QrCode className="w-4 h-4" />
+          Your Exit Payment Code
+        </div>
+
+        {paymentCode ? (
+          <>
+            <div className="text-7xl font-extrabold font-mono tracking-[0.3em] text-white bg-indigo-600/20 border border-indigo-500/50 rounded-2xl px-10 py-6 select-all">
+              {paymentCode}
+            </div>
+            <p className="text-slate-400 text-sm max-w-xs">
+              Enter this code on the customer portal under <span className="text-indigo-300 font-semibold">Payments</span> to settle your bill and open the exit gate.
+            </p>
+          </>
         ) : (
-          <ul className="space-y-2">
-            {payments.map((p) => (
-              <li key={p.paymentId} className="border-b border-slate-600 pb-2">
-                <div className="flex justify-between text-sm">
-                  <span className="font-mono">Code: {p.paymentCode}</span>
-                  <span className="font-mono">ID: {p.paymentId}</span>
-                </div>
-                <div className="flex justify-between text-xs opacity-80 mt-1">
-                  <span>Amount: {p.amount} {p.currency}</span>
-                  <span>Status: {p.status}</span>
-                </div>
-                {p.message && <div className="text-xs opacity-60 mt-1">{p.message}</div>}
-              </li>
-            ))}
-          </ul>
+          <div className="text-slate-500 text-sm py-4">
+            No payment code active right now.
+          </div>
         )}
       </section>
     </div>

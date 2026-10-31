@@ -110,6 +110,7 @@ export interface ParkingSession {
 
 export interface PaymentRecord {
   paymentId: string;
+  paymentCode?: string;
   sessionId: string;
   plateNumber?: string;
   amount: number;
